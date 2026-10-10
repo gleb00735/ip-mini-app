@@ -73,14 +73,42 @@ function webrtcIPs() {
 }
 
 
-// Проверка VPN/прокси/Tor на сервере (endpoints/checkIp)
-function checkIp(ip) {
+// Проверка VPN/прокси/Tor.
+// На хостинге Serverless — через endpoint checkIp; на GitHub Pages endpoint недоступен
+// (другой домен, без CORS), поэтому спрашиваем сервисы с CORS прямо из браузера.
+function checkIpServer(ip) {
   return new Promise(res => {
-    const call = tg?.Serverless?.call;
-    if (!call) return res(null);
     try { tg.Serverless.call('checkIp', {ip}, (err, r) => res(err ? null : r)); }
     catch { res(null); }
+    setTimeout(() => res(null), 10000);
   });
+}
+
+async function checkIpBrowser(ip) {
+  const [q, onion] = await Promise.all([
+    getJSON(`https://api.ipquery.io/${encodeURIComponent(ip)}`),
+    getJSON(`https://onionoo.torproject.org/details?search=${encodeURIComponent(ip)}&fields=exit_addresses,or_addresses`, 8000),
+  ]);
+  if (!q?.risk) return null;
+  const tor = onion?.relays
+    ? onion.relays.some(r => (r.exit_addresses || []).includes(ip)) : undefined;
+  const r = q.risk;
+  return {
+    proxy: r.is_vpn || r.is_proxy,
+    pcProxy: r.is_vpn || r.is_proxy,
+    hosting: r.is_datacenter,
+    mobile: r.is_mobile,
+    tor: tor || r.is_tor,
+    pcType: tor || r.is_tor ? 'TOR' : r.is_vpn ? 'VPN' : r.is_proxy ? 'Proxy'
+      : r.is_datacenter ? 'Hosting' : r.is_mobile ? 'Mobile' : 'Residential',
+    pcRisk: tor ? 100 : r.risk_score,
+    pcProvider: q.isp?.org || q.isp?.isp,
+  };
+}
+
+function checkIp(ip) {
+  return location.hostname.endsWith('tgcloud.ai') && tg?.Serverless
+    ? checkIpServer(ip) : checkIpBrowser(ip);
 }
 
 // Тест утечки DNS через bash.ws: резолвим уникальные поддомены и смотрим, какие DNS-серверы пришли
@@ -168,7 +196,7 @@ async function load() {
     add(v, 'Владелец', sec.pcProvider);
     add(v, 'Обратный DNS', sec.reverse);
   } else {
-    add(v, 'Статус', tg?.Serverless ? 'не удалось проверить' : 'доступно только внутри Telegram');
+    add(v, 'Статус', 'не удалось проверить');
   }
 
   // Утечка DNS
