@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Моё подключение</title>
+<script src="telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:var(--tg-theme-bg-color,#17212b);--card:var(--tg-theme-secondary-bg-color,#232e3c);
+    --text:var(--tg-theme-text-color,#f5f5f5);--hint:var(--tg-theme-hint-color,#8a9aa9);
+    --accent:var(--tg-theme-button-color,#5288c1);--accent-text:var(--tg-theme-button-text-color,#fff);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 -apple-system,system-ui,Segoe UI,Roboto,sans-serif;padding:16px}
+  .hero{text-align:center;padding:20px 12px;background:var(--card);border-radius:16px;margin-bottom:14px}
+  .hero small{color:var(--hint)}
+  .ip{font-size:28px;font-weight:700;word-break:break-all;margin:6px 0}
+  .flag{font-size:36px}
+  button{background:var(--accent);color:var(--accent-text);border:0;border-radius:10px;padding:9px 16px;font-size:14px;margin:4px;cursor:pointer}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--hint);margin:18px 4px 6px}
+  .card{background:var(--card);border-radius:14px;overflow:hidden}
+  .row{display:flex;justify-content:space-between;gap:12px;padding:10px 14px;border-bottom:1px solid rgba(127,127,127,.15)}
+  .row:last-child{border:0}
+  .k{color:var(--hint);flex-shrink:0}
+  .v{text-align:right;word-break:break-all}
+  .ok{color:#4caf50}.bad{color:#ef5350}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+  <div class="hero">
+    <div class="flag" id="flag">🌐</div>
+    <small>Твой IP-адрес</small>
+    <div class="ip" id="ip">загрузка…</div>
+    <small id="place"></small><br>
+    <button onclick="copyAll()">📋 Скопировать всё</button>
+    <button onclick="load()">🔄 Обновить</button>
+  </div>
+  <div id="out"></div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+tg?.ready(); tg?.expand();
+
+const data = {};               // section -> [[key, value], ...]
+const add = (sec, k, v) => {
+  if (v === undefined || v === null || v === '') return;
+  (data[sec] ??= []).push([k, String(v)]);
+};
+const getJSON = (url, ms = 6000) =>
+  fetch(url, {signal: AbortSignal.timeout(ms)}).then(r => r.ok ? r.json() : null).catch(() => null);
+const getText = (url, ms = 6000) =>
+  fetch(url, {signal: AbortSignal.timeout(ms)}).then(r => r.ok ? r.text() : null).catch(() => null);
+const yesNo = b => b === undefined ? undefined : (b ? '⚠️ Да' : '✅ Нет');
+
+// Локальные/публичные адреса, которые утекают через WebRTC
+function webrtcIPs() {
+  return new Promise(res => {
+    const found = new Set();
+    try {
+      const pc = new RTCPeerConnection({iceServers: [{urls: 'stun:stun.l.google.com:19302'}]});
+      pc.createDataChannel('x');
+      pc.onicecandidate = e => {
+        if (!e.candidate) return;
+        const m = e.candidate.candidate.match(/([0-9]{1,3}(\.[0-9]{1,3}){3}|[a-f0-9:]{6,}|[\w-]+\.local)/i);
+        if (m) found.add(m[1]);
+      };
+      pc.createOffer().then(o => pc.setLocalDescription(o));
+      setTimeout(() => { pc.close(); res([...found]); }, 2500);
+    } catch { res([]); }
+  });
+}
+
+
+// Проверка VPN/прокси/Tor на сервере (endpoints/checkIp)
+function checkIp(ip) {
+  return new Promise(res => {
+    const call = tg?.Serverless?.call;
+    if (!call) return res(null);
+    try { tg.Serverless.call('checkIp', {ip}, (err, r) => res(err ? null : r)); }
+    catch { res(null); }
+  });
+}
+
+// Тест утечки DNS через bash.ws: резолвим уникальные поддомены и смотрим, какие DNS-серверы пришли
+async function dnsLeak() {
+  const id = (await getText('https://bash.ws/id'))?.trim();
+  if (!id) return null;
+  await Promise.all([...Array(10)].map((_, i) =>
+    fetch(`https://${i}.${id}.bash.ws/`, {mode: 'no-cors', signal: AbortSignal.timeout(3000)}).catch(() => {})));
+  return getJSON(`https://bash.ws/dnsleak/test/${id}?json`, 8000);
+}
+
+async function load() {
+  for (const k in data) delete data[k];
+  document.getElementById('ip').textContent = 'загрузка…';
+  document.getElementById('out').innerHTML = '';
+
+  const t0 = performance.now();
+  const [who, ipapi, v4, v6, rtc] = await Promise.all([
+    getJSON('https://ipwho.is/'),
+    getJSON('https://ipapi.co/json/'),
+    getText('https://api.ipify.org'),
+    getText('https://api64.ipify.org'),
+    webrtcIPs(),
+  ]);
+  const ping = Math.round(performance.now() - t0);
+
+  const ip = who?.ip || ipapi?.ip || v6 || v4 || 'не удалось определить';
+  const [sec, dns] = await Promise.all([checkIp(ip), dnsLeak()]);
+  document.getElementById('ip').textContent = ip;
+  document.getElementById('flag').textContent = who?.flag?.emoji || '🌐';
+  document.getElementById('place').textContent =
+    [who?.city || ipapi?.city, who?.region || ipapi?.region, who?.country || ipapi?.country_name].filter(Boolean).join(', ');
+
+  // IP
+  add('🌐 IP', 'Основной IP', ip);
+  add('🌐 IP', 'Тип', who?.type || ipapi?.version);
+  add('🌐 IP', 'IPv4', v4);
+  add('🌐 IP', 'IPv6', v6 && v6.includes(':') ? v6 : 'нет');
+  add('🌐 IP', 'Сеть (CIDR)', ipapi?.network);
+
+  // Геолокация
+  const g = '📍 Геолокация';
+  add(g, 'Континент', who?.continent);
+  add(g, 'Страна', (who?.country || ipapi?.country_name) && `${who?.country || ipapi?.country_name} (${who?.country_code || ipapi?.country_code})`);
+  add(g, 'Регион', who?.region || ipapi?.region);
+  add(g, 'Код региона', who?.region_code || ipapi?.region_code);
+  add(g, 'Город', who?.city || ipapi?.city);
+  add(g, 'Индекс', who?.postal || ipapi?.postal);
+  const lat = who?.latitude ?? ipapi?.latitude, lon = who?.longitude ?? ipapi?.longitude;
+  add(g, 'Координаты', lat != null && `${lat}, ${lon}`);
+  add(g, 'Столица', who?.capital);
+  add(g, 'Телефонный код', who?.calling_code && '+' + who.calling_code);
+  add(g, 'Валюта', ipapi?.currency_name ? `${ipapi.currency_name} (${ipapi.currency})` : undefined);
+  add(g, 'Входит в ЕС', who?.is_eu != null ? (who.is_eu ? 'Да' : 'Нет') : undefined);
+
+  // Провайдер
+  const p = '🏢 Провайдер';
+  add(p, 'ISP', who?.connection?.isp);
+  add(p, 'Организация', who?.connection?.org || ipapi?.org);
+  add(p, 'ASN', who?.connection?.asn ? 'AS' + who.connection.asn : ipapi?.asn);
+  add(p, 'Домен', who?.connection?.domain);
+
+  // Время
+  const tz = '🕒 Часовой пояс';
+  add(tz, 'По IP', who?.timezone?.id || ipapi?.timezone);
+  add(tz, 'UTC-смещение', who?.timezone?.utc || ipapi?.utc_offset);
+  add(tz, 'Время по IP', who?.timezone?.current_time);
+  const devTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  add(tz, 'На устройстве', devTz);
+  const ipTz = who?.timezone?.id || ipapi?.timezone;
+  if (ipTz) add(tz, 'Совпадают', ipTz === devTz ? '✅ Да' : '⚠️ Нет (возможен VPN/прокси)');
+
+
+  // VPN / прокси / Tor
+  const v = '🕵️ VPN, прокси, Tor';
+  if (sec) {
+    const masked = sec.proxy || sec.pcProxy || sec.tor || sec.hosting;
+    add(v, 'Итог', masked ? '⚠️ IP похож на VPN/прокси' : '✅ Обычный IP провайдера');
+    add(v, 'Тип IP', sec.pcType);
+    add(v, 'Риск', sec.pcRisk != null ? sec.pcRisk + ' / 100' : undefined);
+    add(v, 'VPN / прокси', yesNo(sec.proxy || sec.pcProxy));
+    add(v, 'Tor', yesNo(sec.tor ?? (sec.pcType === 'TOR')));
+    add(v, 'Хостинг / датацентр', yesNo(sec.hosting));
+    add(v, 'Мобильная сеть', sec.mobile == null ? undefined : (sec.mobile ? 'Да' : 'Нет'));
+    add(v, 'Владелец', sec.pcProvider);
+    add(v, 'Обратный DNS', sec.reverse);
+  } else {
+    add(v, 'Статус', tg?.Serverless ? 'не удалось проверить' : 'доступно только внутри Telegram');
+  }
+
+  // Утечка DNS
+  const n = '🧬 DNS-серверы';
+  if (Array.isArray(dns)) {
+    const servers = dns.filter(x => x.type === 'dns');
+    const verdict = dns.find(x => x.type === 'conclusion')?.ip;
+    const ipCountry = (who?.country_code || ipapi?.country_code || '').toLowerCase();
+    const foreign = servers.filter(x => ipCountry && x.country && x.country !== ipCountry);
+    add(n, 'Найдено серверов', servers.length);
+    if (verdict) add(n, 'Вердикт bash.ws', /not leaking/i.test(verdict) ? '✅ Утечки нет' : '⚠️ ' + verdict);
+    if (ipCountry && servers.length)
+      add(n, 'Страна DNS = страна IP', foreign.length ? `⚠️ Нет (${foreign.length} из ${servers.length})` : '✅ Да');
+    servers.slice(0, 12).forEach((x, i) =>
+      add(n, `DNS #${i + 1}`, `${x.ip} · ${x.country_name || '?'} · ${x.org || x.asn || ''}`));
+  } else {
+    add(n, 'Статус', 'не удалось проверить');
+  }
+
+  // Безопасность / утечки
+  const s = '🛡 Утечки и анонимность';
+  add(s, 'WebRTC адреса', rtc.length ? rtc.join(', ') : 'не найдено');
+  const leak = rtc.some(a => /^\d/.test(a) && a !== ip && !/^(10|127|192\.168|172\.(1[6-9]|2\d|3[01]))\./.test(a));
+  add(s, 'Утечка WebRTC', rtc.length ? (leak ? '⚠️ Возможна' : '✅ Нет') : undefined);
+  add(s, 'Do Not Track', navigator.doNotTrack === '1' ? 'Вкл' : 'Выкл');
+
+  // Соединение
+  const c = '📶 Соединение';
+  const nc = navigator.connection;
+  add(c, 'Тип сети', nc?.type);
+  add(c, 'Эффективный тип', nc?.effectiveType);
+  add(c, 'Скорость (оценка)', nc?.downlink != null ? nc.downlink + ' Мбит/с' : undefined);
+  add(c, 'RTT (оценка)', nc?.rtt != null ? nc.rtt + ' мс' : undefined);
+  add(c, 'Экономия трафика', nc?.saveData != null ? (nc.saveData ? 'Вкл' : 'Выкл') : undefined);
+  add(c, 'Время запросов', ping + ' мс');
+  add(c, 'Онлайн', navigator.onLine ? 'Да' : 'Нет');
+  add(c, 'Протокол страницы', location.protocol);
+
+  // Устройство
+  const d = '📱 Устройство';
+  add(d, 'User-Agent', navigator.userAgent);
+  add(d, 'Платформа', navigator.userAgentData?.platform || navigator.platform);
+  add(d, 'Язык', navigator.languages?.join(', ') || navigator.language);
+  add(d, 'Экран', `${screen.width}×${screen.height} @${devicePixelRatio}x`);
+  add(d, 'Окно', `${innerWidth}×${innerHeight}`);
+  add(d, 'Глубина цвета', screen.colorDepth + ' бит');
+  add(d, 'Ядер CPU', navigator.hardwareConcurrency);
+  add(d, 'ОЗУ (примерно)', navigator.deviceMemory && navigator.deviceMemory + ' ГБ');
+  add(d, 'Сенсорный экран', navigator.maxTouchPoints > 0 ? `Да (${navigator.maxTouchPoints})` : 'Нет');
+  add(d, 'Cookies', navigator.cookieEnabled ? 'Вкл' : 'Выкл');
+
+  // Telegram
+  if (tg) {
+    const t = '✈️ Telegram';
+    const u = tg.initDataUnsafe?.user;
+    add(t, 'Клиент', tg.platform);
+    add(t, 'Версия Bot API', tg.version);
+    add(t, 'Тема', tg.colorScheme);
+    if (u) {
+      add(t, 'User ID', u.id);
+      add(t, 'Имя', [u.first_name, u.last_name].filter(Boolean).join(' '));
+      add(t, 'Username', u.username && '@' + u.username);
+      add(t, 'Язык Telegram', u.language_code);
+      add(t, 'Premium', u.is_premium ? 'Да' : 'Нет');
+    }
+  }
+
+  render(lat, lon);
+}
+
+function render(lat, lon) {
+  const esc = s => s.replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
+  let html = '';
+  for (const [sec, rows] of Object.entries(data)) {
+    html += `<h2>${sec}</h2><div class="card">` +
+      rows.map(([k, v]) => `<div class="row"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join('') +
+      `</div>`;
+  }
+  if (lat != null) {
+    html += `<h2>🗺 Карта</h2><div class="card"><div class="row"><a href="#" id="map">Открыть на карте</a></div></div>`;
+  }
+  document.getElementById('out').innerHTML = html;
+  const m = document.getElementById('map');
+  if (m) m.onclick = e => {
+    e.preventDefault();
+    const url = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lon}#map=11/${lat}/${lon}`;
+    tg?.openLink ? tg.openLink(url) : window.open(url);
+  };
+}
+
+function copyAll() {
+  const text = Object.entries(data)
+    .map(([sec, rows]) => sec + '\n' + rows.map(([k, v]) => `  ${k}: ${v}`).join('\n'))
+    .join('\n\n');
+  navigator.clipboard.writeText(text).then(
+    () => tg?.showAlert ? tg.showAlert('Скопировано') : alert('Скопировано'),
+    () => alert(text)
+  );
+}
+
+load();
+</script>
+</body>
+</html>
